@@ -1,0 +1,105 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation Template for GitHub Self Hosted Runners on ECS'
+
+
+Parameters:
+  GitHubRepoUrl:
+    Type: String
+  Labels:
+    Type: String
+  RunnerName:
+    Type: String
+  SubnetIds:
+    Type: CommaDelimitedList
+
+Mappings:
+  StackMap:
+    Logs:
+      "ECSLogGroupName": !Sub "/ecs/${RunnerName}-ecs-task"
+      "LogRetentionInDays": 90
+
+Resources:
+  GitHubRunnersECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: 'The GitHub Runner ECS Task Defintion Execution Role'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 'ssm:GetParameter*'
+                Resource: '*'
+          PolicyName: 'EnableFetchSecretParamsFromSSM'
+      Path: '/'
+
+  GitHubRunnersECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: 'github-runners-cluster'
+
+  GitHubRunnersECSTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:  
+      ContainerDefinitions:
+        - Name: 'github_runner_image_def'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/github-runner:latest'
+          Cpu: 256
+          Memory: 1024
+          Essential: true
+          Environment:
+            - Name: GITHUB_REPO_URL
+              Value: !Ref GitHubRepoUrl
+            - Name: LABELS
+              Value: !Ref Labels
+            - Name: RUNNER_NAME
+              Value: !Ref RunnerName
+          Secrets:
+            - Name: 'GITHUB_REPO_PAT_TOKEN'
+              ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/github_runner_pat_token'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !FindInMap [StackMap, "Logs", "ECSLogGroupName"]
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
+      ExecutionRoleArn: !GetAtt GitHubRunnersECSTaskExecutionRole.Arn
+      Family: 'github-runner-task'
+      Cpu: '256'
+      Memory: '1024'
+      NetworkMode: 'awsvpc'
+      RequiresCompatibilities:
+        - "FARGATE"
+      #TaskRoleArn: !GetAtt GitHubRunnersECSTaskRole.Arn
+
+  GitHubRunnersECSSvc:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !GetAtt GitHubRunnersECSCluster.Arn
+      DesiredCount: 1
+      LaunchType: 'FARGATE'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: 'ENABLED'
+          Subnets: !Ref SubnetIds
+      ServiceName: 'github-runner-service'
+      TaskDefinition: !Ref GitHubRunnersECSTaskDef
+
+  ECSTaskDefLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !FindInMap [StackMap, "Logs", "ECSLogGroupName"]
+      RetentionInDays: !FindInMap [StackMap, "Logs", "LogRetentionInDays"]
+  
